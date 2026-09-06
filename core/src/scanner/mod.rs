@@ -353,6 +353,30 @@ fn extract_sanitizer_function(code: &str) -> Option<String> {
 }
 
 /// 文件角色分类
+/// 生成稳定的 finding_id：同一文件/规则/行/代码片段应得到同一 ID，
+/// 避免随机 UUID 导致跨轮次无法追踪（EQM E-6）。
+pub fn stable_finding_id(
+    path: &str,
+    line: usize,
+    column: usize,
+    vuln_type: &str,
+    snippet: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(path.as_bytes());
+    hasher.update([0]);
+    hasher.update(line.to_string().as_bytes());
+    hasher.update([0]);
+    hasher.update(column.to_string().as_bytes());
+    hasher.update([0]);
+    hasher.update(vuln_type.as_bytes());
+    hasher.update([0]);
+    hasher.update(snippet.as_bytes());
+    let digest = hasher.finalize();
+    format!("{:x}", digest)
+}
+
 pub fn classify_file_role(path: &str) -> &'static str {
     let normalized = path.replace('\\', "/").to_lowercase();
 
@@ -559,6 +583,29 @@ pub fn detect_barriers(
 
     let context_block: String = lines[check_start..check_end].join("\n").to_lowercase();
 
+    // 通用输入校验屏障（先于类型分支，供所有注入/SSRF/路径类共享）
+    if vuln_type.contains("CWE-78")
+        || vuln_type.contains("CWE-79")
+        || vuln_type.contains("CWE-89")
+        || vuln_type.contains("CWE-918")
+        || vuln_type.contains("CWE-22")
+        || vuln_type.contains("ssrf")
+        || vuln_type.contains("xss")
+        || vuln_type.contains("sql")
+        || vuln_type.contains("injection")
+    {
+        if context_block.contains("preg_match(")
+            || context_block.contains("filter_var(")
+            || context_block.contains("validator")
+            || context_block.contains("validate(")
+            || context_block.contains("validation")
+            || context_block.contains("whitelist")
+            || context_block.contains("isallowed")
+        {
+            barriers.push("input_validation".to_string());
+        }
+    }
+
     // Command/Code Injection 相关屏障
     if vuln_type.contains("CWE-78")
         || vuln_type.contains("CWE-94")
@@ -636,7 +683,11 @@ pub fn detect_barriers(
         if context_block.contains("json.stringify")
             || context_block.contains("serialize")
             || context_block.contains("escapehtml")
+            || context_block.contains("htmlspecialchars")
+            || context_block.contains("htmlentities")
             || context_block.contains("sanitiz")
+            || context_block.contains("dompurify")
+            || context_block.contains("escape(")
         {
             barriers.push("output_encoding".to_string());
         }
@@ -647,6 +698,11 @@ pub fn detect_barriers(
         if context_block.contains("path.normalize")
             || context_block.contains("path.resolve")
             || context_block.contains("realpath")
+            || context_block.contains("filepath.base")
+            || context_block.contains("filepath.clean")
+            || context_block.contains("os.path.basename")
+            || context_block.contains("path.basename")
+            || context_block.contains("path.clean")
             || context_block.contains("..")
                 && (context_block.contains("replace") || context_block.contains("filter"))
         {

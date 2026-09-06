@@ -6,7 +6,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
-use uuid::Uuid;
 
 pub enum RuleMatcher {
     Regex(Regex),
@@ -1053,7 +1052,13 @@ fn create_finding(
     });
 
     Finding {
-        finding_id: Uuid::new_v4().to_string(),
+        finding_id: crate::scanner::stable_finding_id(
+            &file_path,
+            line_start,
+            0,
+            &vuln_type,
+            code_snippet.as_deref().unwrap_or(""),
+        ),
         file_path,
         line_start,
         line_end,
