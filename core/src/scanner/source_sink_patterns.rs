@@ -195,12 +195,18 @@ const PYTHON_PATTERNS: PatternSet = PatternSet {
     sources: &[
         "request.args",
         "request.form",
+        "request.post",
+        "request.files",
         "request.json",
         "request.data",
+        "request.content",
+        "request.stream",
         "request.headers",
         "request.cookies",
         "request.values",
         "request.get_json",
+        "request.query_params",
+        "request.path_params",
         "input(",
         "sys.argv",
         "os.environ",
@@ -257,6 +263,18 @@ const GO_PATTERNS: PatternSet = PatternSet {
         "r.body",
         "r.header.get",
         "r.header",
+        // gin/echo/httprouter 处理器常见请求对象形态
+        "c.query(",
+        "c.param(",
+        "c.postform(",
+        "c.formvalue",
+        "ctx.query(",
+        "ctx.param(",
+        "ctx.formvalue",
+        "req.query(",
+        "req.formvalue",
+        "req.uri",
+        "query().get",
         "os.args",
         "os.getenv",
         "envconfig",
@@ -320,6 +338,19 @@ const RUST_PATTERNS: PatternSet = PatternSet {
         "req.body",
         "request.query",
         "params.",
+        // axum / actix-web 提取器形态（type 语法 Query<T> 与 turbofish Query::<T>）
+        "query<",
+        "path<",
+        "query::<",
+        "path::<",
+        "extract::query",
+        "extract::path",
+        "extract::json",
+        "web::query",
+        "web::path",
+        "web::json",
+        "req.query_string",
+        "req.uri",
     ],
     cmd_sinks: &["std::process::command::new", "command::new"],
     sql_sinks: &[
@@ -674,5 +705,54 @@ func handle(w http.ResponseWriter, r *http.Request) {
 }
 "#;
         assert!(find_local_source_sink("App.java", "CWE-502", "Unsafe deserialization", java, 4).is_some());
+    }
+
+    #[test]
+    fn test_find_local_source_sink_python_request_files() {
+        // Django/Flask 上传处理：request.FILES / request.POST 是路径拼接的常见来源
+        let content = r#"from django.conf import settings
+import os
+
+def upload_avatar(request):
+    name = request.FILES["f"].name
+    path = os.path.join(settings.MEDIA_ROOT, name)
+    return path
+"#;
+        let m = find_local_source_sink("views.py", "CWE-22", "Path traversal", content, 6)
+            .expect("request.FILES should be recognized as a source");
+        assert_eq!(m.source_pattern, "request.files");
+        assert_eq!(m.source_line, 5);
+    }
+
+    #[test]
+    fn test_find_local_source_sink_go_gin_query() {
+        // gin 处理器 c.Query(...) 直入命令 sink
+        let content = r#"package main
+
+import "os/exec"
+
+func ping(c *gin.Context) {
+    out, _ := exec.Command("bash", "-c", c.Query("cmd")).Output()
+    _ = out
+}
+"#;
+        let m = find_local_source_sink("handlers.go", "CWE-78", "Command injection", content, 5)
+            .expect("gin c.Query should be recognized as a source");
+        assert_eq!(m.source_pattern, "c.query(");
+    }
+
+    #[test]
+    fn test_find_local_source_sink_rust_axum_query() {
+        // axum Query<T> 提取器 → Command 执行
+        let content = r#"use std::process::Command;
+
+async fn run(Query(p): Query<Params>) {
+    let out = Command::new(p.cmd).output();
+    let _ = out;
+}
+"#;
+        let m = find_local_source_sink("main.rs", "CWE-78", "Command injection", content, 3)
+            .expect("axum Query<T> should be recognized as a source");
+        assert_eq!(m.source_pattern, "query<");
     }
 }

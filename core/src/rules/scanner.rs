@@ -161,6 +161,20 @@ impl RuleScanner {
                             {
                                 continue;
                             }
+                            // 入口点签名守卫（require_sig_tokens）：函数名启发式类规则
+                            // 会把非入口函数误标（如 Go 内部 UpdateXxx 无 HTTP 参数）。
+                            // 仅当命中是声明式（func 开头）且函数头不含任何入口点 token
+                            // 时才跳过——非 Web 可达入口谈不上"缺失 HTTP 授权"。
+                            if !compiled.rule.require_sig_tokens.is_empty()
+                                && matched_decl_starts_with_func(content, start_pos)
+                                && !sig_has_entrypoint_token(
+                                    content,
+                                    start_pos,
+                                    &compiled.rule.require_sig_tokens,
+                                )
+                            {
+                                continue;
+                            }
                             let ranges = comment_ranges_cache
                                 .get_or_insert_with(|| collect_comment_ranges(content, &extension));
                             if position_in_ranges(ranges, start_pos) {
@@ -1468,6 +1482,32 @@ fn enclosing_func_has_auth_check(
         .any(|kw| body_lower.contains(&kw.to_lowercase()))
 }
 
+/// 判断命中是否位于"func 开头"的 Go 函数声明处（require_sig_tokens 守卫
+/// 只作用于声明式命中，避免误伤函数体内的非声明命中）。
+fn matched_decl_starts_with_func(content: &str, start_pos: usize) -> bool {
+    content[start_pos..]
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("func ")
+}
+
+/// 入口点签名守卫：取命中位置到函数头首个 `{` 之间的函数头文本，检查是否
+/// 包含任一入口点 token（Web 框架请求/响应参数类型名，如 `http.`/`gin.`）。
+fn sig_has_entrypoint_token(content: &str, start_pos: usize, tokens: &[String]) -> bool {
+    if tokens.is_empty() || start_pos >= content.len() {
+        return true;
+    }
+    let rest = &content[start_pos..];
+    let Some(rel_end) = rest.find('{') else {
+        return false;
+    };
+    let header = &content[start_pos..start_pos + rel_end];
+    let header_lower = header.to_lowercase();
+    tokens
+        .iter()
+        .any(|t| header_lower.contains(&t.to_lowercase()))
+}
+
 /// 收集 PHP 文件中"非裸调用"形态的被调用名/定义名字节范围：
 /// 方法调用（member_call_expression）、静态调用（scoped_call_expression）、
 /// 构造调用（object_creation_expression）、函数/方法定义（function_definition /
@@ -1676,6 +1716,7 @@ mod tests {
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -1690,6 +1731,54 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("likely_fp"));
+    }
+
+    #[test]
+    fn test_go_missing_auth_require_sig_tokens() {
+        // E-3 FP 清理：函数名启发式命中内部非入口函数（无 HTTP 参数）应跳过，
+        // 真 handler（含 *http.Request / gin.Context）保留
+        let mk_rule = || Rule {
+            id: "go-missing-authorization".to_string(),
+            name: "t".to_string(),
+            description: "t".to_string(),
+            severity: crate::rules::model::Severity::High,
+            language: "go".to_string(),
+            pattern: Some(
+                r"(?m)^\s*func\s+(?:\([^)]*\)\s+)?\w*(?:Get|Delete|Update|Remove|Find|Edit)\w*\s*\([^)]*\)\s*\{"
+                    .to_string(),
+            ),
+            patterns: None,
+            query: None,
+            cwe: Some("CWE-862".to_string()),
+            sanitizers: vec![],
+            sanitizer_file_scope: false,
+            sanitizer_match: SanitizerMatch::Any,
+            once_per_file: false,
+            exclude_string_literals: false,
+            sanitizer_include_chain: false,
+            php_bare_call_only: false,
+            sanitizer_after_lines: 0,
+            sanitizer_before_lines: 0,
+            go_io_copy_requires_open_file: false,
+            auth_check_in_func: false,
+            skip_likely_fp: false,
+            dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec!["http.".into(), "gin.".into(), "echo.".into()],
+            category: None,
+            owasp: None,
+            remediation: None,
+            references: None,
+        };
+        // 内部非入口函数：UpdateLastFileModTime 无 HTTP 请求/响应参数
+        let internal = "package cfg\n\nfunc (c *Config) UpdateLastFileModTime() {\n}\n";
+        // 真 handler：*http.Request 参数
+        let handler = "package api\n\nfunc (h *Handler) UpdateNote(w http.ResponseWriter, r *http.Request) {\n}\n";
+        // gin handler
+        let gin = "package api\n\nfunc DeleteNote(c *gin.Context) {\n}\n";
+        let scanner = RuleScanner::new(vec![mk_rule()]);
+        assert_eq!(scanner.scan_file_sync(&PathBuf::from("cfg.go"), internal).len(), 0);
+        assert_eq!(scanner.scan_file_sync(&PathBuf::from("api.go"), handler).len(), 1);
+        assert_eq!(scanner.scan_file_sync(&PathBuf::from("api.go"), gin).len(), 1);
     }
 
     #[test]
@@ -1719,6 +1808,7 @@ mod tests {
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -1764,6 +1854,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -1809,6 +1900,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -1855,6 +1947,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -1911,6 +2004,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -1972,6 +2066,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -2028,6 +2123,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -2072,6 +2168,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -2114,6 +2211,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -2199,6 +2297,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -2245,6 +2344,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -2300,6 +2400,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -2371,6 +2472,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -2416,6 +2518,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -2454,6 +2557,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -2658,6 +2762,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -2708,6 +2813,7 @@ $upsql = Input::postStrVar('upsql', '');
             auth_check_in_func: false,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             remediation: None,
@@ -2883,6 +2989,7 @@ func (s *Server) UpdateAccount(w http.ResponseWriter, r *http.Request) {
             auth_check_in_func: true,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             references: None,
@@ -2927,6 +3034,7 @@ func (s *Server) UpdateAccountFixed(w http.ResponseWriter, r *http.Request) {
             auth_check_in_func: true,
             skip_likely_fp: false,
             dead_sanitizer_patterns: vec![],
+            require_sig_tokens: vec![],
             category: None,
             owasp: None,
             references: None,

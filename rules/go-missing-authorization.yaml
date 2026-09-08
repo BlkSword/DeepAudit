@@ -15,6 +15,16 @@ once_per_file: false
 patterns:
   - language: go
     pattern: '(?m)^\s*func\s+(?:\([^)]*\)\s+)?\w*(?:Get|Delete|Update|Remove|Find|Edit|Modify|GetById|DeleteById|UpdateById)\w*\s*\([^)]*\)\s*\{'
+# 入口点签名要求（函数名启发式会把内部非入口函数误标，如内部 UpdateLastFileModTime）：
+# 函数头必须含 Web 请求/响应参数类型才视为可达 HTTP 入口，"缺失授权"才成立
+require_sig_tokens:
+  - "http."
+  - "gin."
+  - "echo."
+  - "fiber."
+  - "fasthttp."
+  - "chi."
+  - "mux."
 sanitizers:
   - "user_id"
   - "userid"

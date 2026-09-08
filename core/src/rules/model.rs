@@ -117,6 +117,14 @@ pub struct Rule {
     /// 用于 strim(name, 0, ...) 恒 NULL 这类常量陷阱 API。
     #[serde(default)]
     pub dead_sanitizer_patterns: Vec<String>,
+    /// 入口点签名要求（missing-authorization 家族 FP 清理）：函数名启发式
+    /// （get/update/delete 等资源操作名前缀）会把内部非入口函数误标为"缺失
+    /// 授权"。命中点为函数声明时，若函数头（声明起至首个 `{`）不含任一
+    /// 入口点 token（如 `http.`/`gin.`/`echo.`——HTTP 请求/响应参数类型），
+    /// 该函数不是 Web 可达入口，跳过。仅对声明式 regex 命中生效；token 列表
+    /// 为空时守卫关闭（默认，不影响既有规则）。
+    #[serde(default)]
+    pub require_sig_tokens: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]

@@ -22,6 +22,11 @@ sources:
       - "request.text()"
       - "request.json()"
       - "request.url"
+      # Remix/React-Router request.headers / Next.js App Router
+      # （request.nextUrl.searchParams 等）——同 request.* 输入族补全
+      - "request.headers"
+      - "request.nextUrl"
+      - "request.searchParams"
     languages: ["javascript", "typescript"]
     severity: "High"
     category: "UserInput"

@@ -2772,6 +2772,15 @@ fn enrich_rule_findings_with_local_source_sink(
             graph_snapshot: None,
         });
 
+        // E-2：单跳证据补齐 source/sink 代码片段，让 LLM 直接看到源/汇聚点行文本，
+        // 而不必再经 evidence_refs 反查文件（EQM evidence 完整率按此列统计）。
+        if finding.source_snippet.is_none() {
+            finding.source_snippet = line_snippet(content, matched.source_line);
+        }
+        if finding.sink_snippet.is_none() {
+            finding.sink_snippet = line_snippet(content, finding.line_start);
+        }
+
         finding.confidence = Some(finding.confidence.unwrap_or(0.5).max(0.85));
     }
 }
@@ -3544,6 +3553,37 @@ mod tests {
     }
 
     // ── enclosing_function 符号填充 ─────────────────────────
+
+    #[test]
+    fn test_rule_single_hop_enrichment_fills_snippets() {
+        use std::collections::HashMap;
+        let finding = Finding {
+            finding_id: "single-hop".to_string(),
+            file_path: "app.py".to_string(),
+            line_start: 6,
+            line_end: 6,
+            detector: "RegexRule: xss-detection".to_string(),
+            vuln_type: "CWE-79".to_string(),
+            severity: "medium".to_string(),
+            description: "XSS in template".to_string(),
+            confidence: Some(0.5),
+            ..Default::default()
+        };
+        let content = "from flask import render_template_string\n\n@app.route(\"/\")\ndef home():\n    name = request.args.get(\"name\")\n    return render_template_string(\"<h1>{{ name }}</h1>\", name=name)\n";
+        let mut cache = HashMap::new();
+        cache.insert("app.py".to_string(), content.to_string());
+        let mut findings = vec![finding];
+        enrich_rule_findings_with_local_source_sink(&mut findings, &cache);
+        let f = &findings[0];
+        assert!(f.evidence_refs.is_some(), "expected single-hop evidence");
+        let src = f.source_snippet.as_deref().unwrap_or("");
+        let sink = f.sink_snippet.as_deref().unwrap_or("");
+        assert!(src.contains("request.args"), "source snippet missing: {src}");
+        assert!(
+            sink.contains("render_template_string"),
+            "sink snippet missing: {sink}"
+        );
+    }
 
     /// 构造带函数区间的测试符号表：
     /// - outer 函数 [10, 100]，内层嵌套 inner 函数 [40, 60]
